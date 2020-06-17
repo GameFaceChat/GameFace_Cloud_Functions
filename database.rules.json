@@ -1,0 +1,36 @@
+{
+  "rules": {
+    "users": {
+      "$uid": {
+        ".read": "auth.uid == $uid",
+        ".write": "auth.uid == $uid",
+        "friends": {
+          "$friendUID": {
+            ".write": "auth.uid == $friendUID"
+          }
+        },
+        "friendRequests": {
+          "$friendUID": {
+            ".write": "auth.uid == $friendUID"
+          }
+        },
+        "friendRequestsSent": {
+          "$friendUID": {
+            ".write": "auth.uid == $friendUID"
+          }
+        }
+      }
+    },
+    "profiles": {
+      ".indexOn": ["username"],
+      ".read": "auth.uid != null",
+      "$uid": {
+        ".write": "$uid == auth.uid"
+      }
+    },
+    "rooms": {
+      ".read": "auth.uid != null",
+      ".write": "auth.uid != null"
+    }
+  }
+}
