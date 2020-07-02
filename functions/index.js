@@ -93,6 +93,7 @@ app.post("/call", async (req, res) => {
       fromUID: req.body.fromProfile.uid,
       fromProfilePic: req.body.fromProfile.profilePic,
       roomID: req.body.roomID,
+      toUID: req.body.toUID,
     },
   };
   const response = await admin.messaging().sendToDevice(tokens, payload);
@@ -152,6 +153,7 @@ exports.sendFriendRequest = functions.database
         type: "NOTIFICATION",
         title: "Friend Request",
         body: "You have a new friend request!",
+        toUID: context.params.uid,
       },
     };
 
