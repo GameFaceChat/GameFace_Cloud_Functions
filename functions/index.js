@@ -11,6 +11,62 @@ const client = require("twilio")(functions.config().twilio.sid, functions.config
 
 app.use(cors);
 app.use(express.json());
+
+/*
+  Development
+*/
+function deleteUser(uid) {
+  return admin
+    .auth()
+    .deleteUser(uid)
+    .then(function () {
+      console.log("Successfully deleted user", uid);
+    })
+    .catch(function (error) {
+      console.log("Error deleting user:", error);
+    });
+}
+
+function deleteAllUsers(nextPageToken) {
+  let promises = [];
+
+  promises.push(
+    admin
+      .auth()
+      .listUsers(250, nextPageToken)
+      .then(function (listUsersResult) {
+        listUsersResult.users.forEach(function (userRecord) {
+          let uid = userRecord.toJSON().uid;
+          promises.push(deleteUser(uid));
+        });
+      })
+      .catch(function (error) {
+        console.log("Error listing users:", error);
+      })
+  );
+
+  promises.push(admin.database().ref("/users").remove());
+  promises.push(admin.database().ref("/profiles").remove());
+
+  admin.storage().bucket("gs://gameface-chat.appspot.com/").delete();
+
+  return promises;
+}
+
+app.get("/deleteAll", async (req, res) => {
+  try {
+    await Promise.all(deleteAllUsers());
+    res.status(200).send("ALL SENT");
+    return;
+  } catch (error) {
+    res.status(500).send("ERROR WHEN DELETING" + error.toString());
+    return;
+  }
+});
+
+/* 
+Production
+*/
 const validateFirebaseIdToken = async (req, res, next) => {
   console.log("START FIREBASE TOKEN AUTH");
   if (
@@ -34,7 +90,6 @@ const validateFirebaseIdToken = async (req, res, next) => {
   try {
     const decodedIdToken = await admin.auth().verifyIdToken(idToken);
     req.user = decodedIdToken;
-    console.log("Decoded ID Token", decodedIdToken);
     next();
   } catch (error) {
     console.log("ERROR: " + error);
@@ -59,61 +114,6 @@ app.get("/servers", (req, res) => {
   console.log("FINISHED SERVERS");
 });
 
-/*
-JSON should have props:
-{
-  fromProfile, toUID, roomID
-}
-*/
-app.post("/call", async (req, res) => {
-  console.log("CALLING with body: " + req.body);
-  if (
-    !req.body.hasOwnProperty("fromProfile") ||
-    !req.body.hasOwnProperty("toUID") ||
-    !req.body.hasOwnProperty("roomID")
-  ) {
-    console.log("ERROR");
-    return res.status(400).send("Wrong format");
-  }
-
-  let devicesToUser = await admin
-    .database()
-    .ref(`/users/${req.body.toUID}/devicesID/`)
-    .once("value");
-  if (!devicesToUser.hasChildren()) {
-    return res.status(200).send("There are no notification tokens to send to.");
-  }
-  const tokens = Object.keys(devicesToUser.val());
-  const tokensToRemove = [];
-  const payload = {
-    data: {
-      type: "CALL",
-      fromName: req.body.fromProfile.name,
-      fromUsername: req.body.fromProfile.username,
-      fromUID: req.body.fromProfile.uid,
-      fromProfilePic: req.body.fromProfile.profilePic,
-      roomID: req.body.roomID,
-      toUID: req.body.toUID,
-    },
-  };
-  const response = await admin.messaging().sendToDevice(tokens, payload);
-  response.results.forEach((result, index) => {
-    const error = result.error;
-    if (error) {
-      console.error("Failure sending notification to", tokens[index], error);
-      if (
-        error.code === "messaging/invalid-registration-token" ||
-        error.code === "messaging/registration-token-not-registered"
-      ) {
-        tokensToRemove.push(devices.ref.child(tokens[index]).remove());
-      }
-    }
-  });
-  console.log("FINISHED CALLING");
-  await Promise.all(tokensToRemove);
-  return res.status(200).send("Finished");
-});
-
 exports.app = functions.https.onRequest(app);
 
 // exports.deleteRoom = functions.database
@@ -125,28 +125,68 @@ exports.app = functions.https.onRequest(app);
 //     }
 //   });
 
+// The location should have:
+// Member status
+// roomID
+// timestamp
+async function sendNotification(uid, payload) {
+  let devicesToUser = await admin.database().ref(`/users/${uid}/devicesID/`).once("value");
+  if (!devicesToUser.hasChildren()) {
+    return console.log("There are no notification tokens to send to.");
+  }
+  //Device Tokens
+  const tokens = Object.keys(devicesToUser.val());
+  const tokensToRemove = [];
+  //Wait to see if everything sent
+  const response = await admin.messaging().sendToDevice(tokens, payload);
+  response.results.forEach((result, index) => {
+    const error = result.error;
+    if (error) {
+      console.error("Failure sending notification to", tokens[index], error);
+      if (
+        error.code === "messaging/invalid-registration-token" ||
+        error.code === "messaging/registration-token-not-registered"
+      ) {
+        tokensToRemove.push(devices.ref.child(tokens[index]).remove());
+      }
+    } else {
+      console.log(`Sent notification to ${tokens[index]}`);
+    }
+  });
+  return Promise.all(tokensToRemove);
+}
+
+exports.call = functions.database
+  .ref("/rooms/{roomID}/members/{uid}")
+  .onWrite(async (snap, context) => {
+    console.log("CALLING with body: " + JSON.stringify(snap.after.val()));
+    if (snap.after.val() == null) return console.log("MEMBER Deleted?");
+    let member = snap.after.val();
+    if (member.memberStatus != "CALLING") return console.log("User not in calling");
+
+    //Send this to each device
+    const payload = {
+      data: {
+        type: "CALL",
+        roomID: member.roomID,
+        toUID: context.params.uid,
+      },
+    };
+
+    return sendNotification(context.params.uid, payload);
+  });
+
 exports.sendFriendRequest = functions.database
   .ref("/users/{uid}/friendRequests/{pushID}")
   .onWrite(async (snap, context) => {
     // console.log(context.params.pushID);
-    console.log("SEND FRIEND REQUEST");
+    console.log(`SEND FRIEND REQUEST to: ${context.params.uid}`);
     //Removed
     if (snap.after.val() == null) {
       return false;
     }
     //User containing UID, date sent, accepted value
     let request = snap.after.val();
-    //Devices
-    let devices = await admin
-      .database()
-      .ref(`/users/${context.params.uid}/devicesID/`)
-      .once("value");
-
-    if (!devices.hasChildren()) {
-      return console.log("There are no notification tokens to send to.");
-    }
-    const tokens = Object.keys(devices.val());
-    const tokensToRemove = [];
 
     const payload = {
       data: {
@@ -156,21 +196,7 @@ exports.sendFriendRequest = functions.database
         toUID: context.params.uid,
       },
     };
-
-    const response = await admin.messaging().sendToDevice(tokens, payload);
-    response.results.forEach((result, index) => {
-      const error = result.error;
-      if (error) {
-        console.error("Failure sending notification to", tokens[index], error);
-        if (
-          error.code === "messaging/invalid-registration-token" ||
-          error.code === "messaging/registration-token-not-registered"
-        ) {
-          tokensToRemove.push(devices.ref.child(tokens[index]).remove());
-        }
-      }
-    });
-    return Promise.all(tokensToRemove);
+    return sendNotification(context.params.uid, payload);
   });
 
 // let ob = {"users":{"uid":{"friendRequestsSent": {"PUSHID":{"fromUID":"srihari2", "toUID":"SRIHARI"}}}}}
