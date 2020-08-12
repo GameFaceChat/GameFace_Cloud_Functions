@@ -31,6 +31,16 @@
     "rooms": {
       ".read": "auth.uid != null",
       ".write": "auth.uid != null"
+    },
+    "store": {
+      ".write": "false",
+      ".read": "auth.uid != null"
+    },
+    "owned_packs": {
+      "$uid": {
+        ".write": "auth.uid == $uid",
+        ".read": "auth.uid != null"
+      }
     }
   }
 }
